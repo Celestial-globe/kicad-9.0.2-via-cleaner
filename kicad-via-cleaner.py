@@ -7,103 +7,223 @@ import wx
 import pcbnew
 import time
 import math
+import json
+from collections import defaultdict
+from typing import List, Tuple, Dict, Set
+
+class SpatialIndex:
+    """空間インデックスによる高速近隣検索"""
+    def __init__(self, grid_size=1000000):  # 1mm単位のグリッド
+        self.grid_size = grid_size
+        self.grid = defaultdict(list)
+    
+    def add_item(self, x, y, item):
+        grid_x = x // self.grid_size
+        grid_y = y // self.grid_size
+        self.grid[(grid_x, grid_y)].append((x, y, item))
+    
+    def get_nearby_items(self, x, y, radius):
+        grid_x = x // self.grid_size
+        grid_y = y // self.grid_size
+        grid_radius = (radius // self.grid_size) + 1
+        
+        nearby_items = []
+        for gx in range(grid_x - grid_radius, grid_x + grid_radius + 1):
+            for gy in range(grid_y - grid_radius, grid_y + grid_radius + 1):
+                nearby_items.extend(self.grid.get((gx, gy), []))
+        
+        return nearby_items
 
 class ViaCleanerDialog(wx.Dialog):
     def __init__(self, parent):
-        wx.Dialog.__init__(self, parent, title="VIA クリーナー", size=(450, 400))
+        wx.Dialog.__init__(self, parent, title="VIA クリーナー（高速化版）", size=(380, 340))
         
-        self.clearance = 0.2  # デフォルトクリアランス値 (mm)
-        self.board_edge_clearance = 0.3  # 基板エッジクリアランス値 (mm)
-        self.zone_clearance = 0.2  # ゾーンエッジクリアランス値 (mm)
+        # デフォルト設定
+        self.default_settings = {
+            'clearance': 0.2,
+            'board_edge_clearance': 0.3,
+            'zone_clearance': 0.2,
+            'check_components': True,
+            'check_nets': True,
+            'check_board_edge': True,
+            'check_zones': True,
+            'check_outside_board': True
+        }
         
-        # メインパネルとスクロールバー
+        # 設定ファイルのパス
+        self.settings_file = os.path.join(os.path.dirname(__file__), 'via_cleaner_settings.json')
+        
+        # 設定を読み込み
+        self.load_settings()
+        
+        # メインパネル
         main_panel = wx.Panel(self)
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         
-        # スクロール可能なパネル
-        scroll_panel = wx.ScrolledWindow(main_panel, style=wx.VSCROLL)
-        scroll_panel.SetScrollRate(0, 10)
-        vbox = wx.BoxSizer(wx.VERTICAL)
+        # ===== 数値設定部分 =====
+        values_box = wx.StaticBox(main_panel, label="クリアランス設定 (mm)")
+        values_sizer = wx.StaticBoxSizer(values_box, wx.VERTICAL)
         
-        # パネルの内容をスクロールパネルに追加
-        panel = wx.Panel(scroll_panel)
-        panel_sizer = wx.BoxSizer(wx.VERTICAL)
+        # グリッドレイアウトで数値設定を整理
+        grid_sizer = wx.FlexGridSizer(3, 2, 5, 10)
+        grid_sizer.AddGrowableCol(1, 1)
         
-        # クリアランス設定
-        clearance_box = wx.BoxSizer(wx.HORIZONTAL)
-        clearance_label = wx.StaticText(panel, label="最小クリアランス (mm):", size=(200, -1))
-        clearance_box.Add(clearance_label, flag=wx.RIGHT|wx.ALIGN_CENTER_VERTICAL, border=8)
-        self.clearance_ctrl = wx.TextCtrl(panel, value=str(self.clearance))
-        clearance_box.Add(self.clearance_ctrl, proportion=1)
-        panel_sizer.Add(clearance_box, flag=wx.EXPAND|wx.ALL, border=10)
+        # 最小クリアランス
+        clearance_label = wx.StaticText(main_panel, label="最小クリアランス:")
+        self.clearance_ctrl = wx.TextCtrl(main_panel, value=str(self.clearance), size=(80, -1))
+        grid_sizer.Add(clearance_label, flag=wx.ALIGN_CENTER_VERTICAL)
+        grid_sizer.Add(self.clearance_ctrl, flag=wx.EXPAND)
         
-        # 基板エッジクリアランス設定
-        board_edge_box = wx.BoxSizer(wx.HORIZONTAL)
-        board_edge_label = wx.StaticText(panel, label="基板エッジクリアランス (mm):", size=(200, -1))
-        board_edge_box.Add(board_edge_label, flag=wx.RIGHT|wx.ALIGN_CENTER_VERTICAL, border=8)
-        self.board_edge_ctrl = wx.TextCtrl(panel, value=str(self.board_edge_clearance))
-        board_edge_box.Add(self.board_edge_ctrl, proportion=1)
-        panel_sizer.Add(board_edge_box, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, border=10)
+        # 基板エッジクリアランス
+        board_edge_label = wx.StaticText(main_panel, label="基板エッジ:")
+        self.board_edge_ctrl = wx.TextCtrl(main_panel, value=str(self.board_edge_clearance), size=(80, -1))
+        grid_sizer.Add(board_edge_label, flag=wx.ALIGN_CENTER_VERTICAL)
+        grid_sizer.Add(self.board_edge_ctrl, flag=wx.EXPAND)
         
-        # ゾーンエッジクリアランス設定
-        zone_box = wx.BoxSizer(wx.HORIZONTAL)
-        zone_label = wx.StaticText(panel, label="ゾーンエッジクリアランス (mm):", size=(200, -1))
-        zone_box.Add(zone_label, flag=wx.RIGHT|wx.ALIGN_CENTER_VERTICAL, border=8)
-        self.zone_ctrl = wx.TextCtrl(panel, value=str(self.zone_clearance))
-        zone_box.Add(self.zone_ctrl, proportion=1)
-        panel_sizer.Add(zone_box, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, border=10)
+        # ゾーンエッジクリアランス
+        zone_label = wx.StaticText(main_panel, label="ゾーンエッジ:")
+        self.zone_ctrl = wx.TextCtrl(main_panel, value=str(self.zone_clearance), size=(80, -1))
+        grid_sizer.Add(zone_label, flag=wx.ALIGN_CENTER_VERTICAL)
+        grid_sizer.Add(self.zone_ctrl, flag=wx.EXPAND)
         
-        # オプション（グループ化）
-        options_box = wx.StaticBox(panel, label="チェックオプション")
+        values_sizer.Add(grid_sizer, flag=wx.EXPAND|wx.ALL, border=10)
+        
+        # ===== チェックオプション部分 =====
+        options_box = wx.StaticBox(main_panel, label="チェックオプション")
         options_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
         
-        self.check_components = wx.CheckBox(panel, label="部品との衝突チェック")
-        self.check_components.SetValue(True)
-        options_sizer.Add(self.check_components, flag=wx.EXPAND|wx.ALL, border=5)
+        # チェックボックスを2列に配置
+        checkbox_grid = wx.FlexGridSizer(3, 2, 5, 10)
+        checkbox_grid.AddGrowableCol(0, 1)
+        checkbox_grid.AddGrowableCol(1, 1)
         
-        self.check_nets = wx.CheckBox(panel, label="異なるネットとの衝突チェック")
-        self.check_nets.SetValue(True)
-        options_sizer.Add(self.check_nets, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, border=5)
+        self.check_components = wx.CheckBox(main_panel, label="部品との衝突")
+        self.check_components.SetValue(self.check_components_value)
+        checkbox_grid.Add(self.check_components, flag=wx.EXPAND)
         
-        self.check_board_edge = wx.CheckBox(panel, label="基板エッジとの衝突チェック")
-        self.check_board_edge.SetValue(True)
-        options_sizer.Add(self.check_board_edge, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, border=5)
+        self.check_nets = wx.CheckBox(main_panel, label="異なるネット")
+        self.check_nets.SetValue(self.check_nets_value)
+        checkbox_grid.Add(self.check_nets, flag=wx.EXPAND)
         
-        self.check_zones = wx.CheckBox(panel, label="ゾーンエッジとの衝突チェック")
-        self.check_zones.SetValue(True)
-        options_sizer.Add(self.check_zones, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, border=5)
+        self.check_board_edge = wx.CheckBox(main_panel, label="基板エッジ")
+        self.check_board_edge.SetValue(self.check_board_edge_value)
+        checkbox_grid.Add(self.check_board_edge, flag=wx.EXPAND)
         
-        # 新規オプション：基板外VIA削除
-        self.check_outside_board = wx.CheckBox(panel, label="基板外のVIAを削除")
-        self.check_outside_board.SetValue(True)
-        options_sizer.Add(self.check_outside_board, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, border=5)
+        self.check_zones = wx.CheckBox(main_panel, label="ゾーンエッジ")
+        self.check_zones.SetValue(self.check_zones_value)
+        checkbox_grid.Add(self.check_zones, flag=wx.EXPAND)
         
-        panel_sizer.Add(options_sizer, flag=wx.EXPAND|wx.ALL, border=10)
+        self.check_outside_board = wx.CheckBox(main_panel, label="基板外VIA削除")
+        self.check_outside_board.SetValue(self.check_outside_board_value)
+        checkbox_grid.Add(self.check_outside_board, flag=wx.EXPAND)
         
-        # パネルの設定
-        panel.SetSizer(panel_sizer)
-        panel.Fit()
+        # 空のスペースを追加してバランスを取る
+        checkbox_grid.Add(wx.StaticText(main_panel, label=""), flag=wx.EXPAND)
         
-        # スクロールパネルのサイズを設定
-        scroll_panel.SetSizer(vbox)
-        vbox.Add(panel, flag=wx.EXPAND)
-        scroll_panel.FitInside()  # スクロールバーを正しく表示するために必要
+        options_sizer.Add(checkbox_grid, flag=wx.EXPAND|wx.ALL, border=10)
         
-        # ボタン（メインパネルに追加）
+        # ===== ボタン部分 =====
         button_box = wx.BoxSizer(wx.HORIZONTAL)
-        cancel_button = wx.Button(main_panel, wx.ID_CANCEL, "キャンセル")
-        ok_button = wx.Button(main_panel, wx.ID_OK, "OK")
-        button_box.Add(cancel_button)
-        button_box.Add(ok_button, flag=wx.LEFT, border=10)
         
-        # メインパネルにスクロールパネルとボタンを追加
-        main_sizer.Add(scroll_panel, proportion=1, flag=wx.EXPAND|wx.ALL, border=10)
-        main_sizer.Add(button_box, flag=wx.ALIGN_RIGHT|wx.ALL, border=20)
+        reset_button = wx.Button(main_panel, label="デフォルト", size=(80, -1))
+        button_box.Add(reset_button)
+        
+        # スペーサーを追加
+        button_box.AddStretchSpacer()
+        
+        cancel_button = wx.Button(main_panel, wx.ID_CANCEL, "キャンセル", size=(80, -1))
+        ok_button = wx.Button(main_panel, wx.ID_OK, "OK", size=(80, -1))
+        
+        button_box.Add(cancel_button, flag=wx.RIGHT, border=5)
+        button_box.Add(ok_button)
+        
+        # メイン配置
+        main_sizer.Add(values_sizer, flag=wx.EXPAND|wx.ALL, border=10)
+        main_sizer.Add(options_sizer, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, border=10)
+        main_sizer.Add(button_box, flag=wx.EXPAND|wx.ALL, border=15)
         
         main_panel.SetSizer(main_sizer)
         
-        # イベントバインディング
+        # イベントバインディング 
         ok_button.Bind(wx.EVT_BUTTON, self.on_ok)
+        reset_button.Bind(wx.EVT_BUTTON, self.on_reset)
+        
+        # ダイアログを中央に配置
+        self.Center()
+    
+    def load_settings(self):
+        """設定を読み込み"""
+        try:
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                
+                # 設定値を適用（存在しない場合はデフォルト値を使用）
+                self.clearance = settings.get('clearance', self.default_settings['clearance'])
+                self.board_edge_clearance = settings.get('board_edge_clearance', self.default_settings['board_edge_clearance'])
+                self.zone_clearance = settings.get('zone_clearance', self.default_settings['zone_clearance'])
+                self.check_components_value = settings.get('check_components', self.default_settings['check_components'])
+                self.check_nets_value = settings.get('check_nets', self.default_settings['check_nets'])
+                self.check_board_edge_value = settings.get('check_board_edge', self.default_settings['check_board_edge'])
+                self.check_zones_value = settings.get('check_zones', self.default_settings['check_zones'])
+                self.check_outside_board_value = settings.get('check_outside_board', self.default_settings['check_outside_board'])
+            else:
+                # 設定ファイルが存在しない場合はデフォルト値を使用
+                self.reset_to_defaults()
+        except Exception as e:
+            # 設定ファイルの読み込みに失敗した場合はデフォルト値を使用
+            wx.MessageBox(f"設定ファイルの読み込みに失敗しました。デフォルト値を使用します。\nエラー: {str(e)}", 
+                         "警告", wx.OK | wx.ICON_WARNING)
+            self.reset_to_defaults()
+    
+    def save_settings(self):
+        """設定を保存"""
+        try:
+            settings = {
+                'clearance': self.clearance,
+                'board_edge_clearance': self.board_edge_clearance,
+                'zone_clearance': self.zone_clearance,
+                'check_components': self.check_components.GetValue(),
+                'check_nets': self.check_nets.GetValue(),
+                'check_board_edge': self.check_board_edge.GetValue(),
+                'check_zones': self.check_zones.GetValue(),
+                'check_outside_board': self.check_outside_board.GetValue()
+            }
+            
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, indent=2, ensure_ascii=False)
+                
+        except Exception as e:
+            wx.MessageBox(f"設定ファイルの保存に失敗しました。\nエラー: {str(e)}", 
+                         "エラー", wx.OK | wx.ICON_ERROR)
+    
+    def reset_to_defaults(self):
+        """デフォルト値に戻す"""
+        self.clearance = self.default_settings['clearance']
+        self.board_edge_clearance = self.default_settings['board_edge_clearance']
+        self.zone_clearance = self.default_settings['zone_clearance']
+        self.check_components_value = self.default_settings['check_components']
+        self.check_nets_value = self.default_settings['check_nets']
+        self.check_board_edge_value = self.default_settings['check_board_edge']
+        self.check_zones_value = self.default_settings['check_zones']
+        self.check_outside_board_value = self.default_settings['check_outside_board']
+    
+    def on_reset(self, event):
+        """デフォルトに戻すボタンのイベント"""
+        result = wx.MessageBox("設定をデフォルト値に戻しますか？", "確認", wx.YES_NO | wx.ICON_QUESTION)
+        if result == wx.YES:
+            self.reset_to_defaults()
+            # UIを更新
+            self.clearance_ctrl.SetValue(str(self.clearance))
+            self.board_edge_ctrl.SetValue(str(self.board_edge_clearance))
+            self.zone_ctrl.SetValue(str(self.zone_clearance))
+            self.check_components.SetValue(self.check_components_value)
+            self.check_nets.SetValue(self.check_nets_value)
+            self.check_board_edge.SetValue(self.check_board_edge_value)
+            self.check_zones.SetValue(self.check_zones_value)
+            self.check_outside_board.SetValue(self.check_outside_board_value)
+            
+            wx.MessageBox("設定をデフォルト値に戻しました", "完了", wx.OK | wx.ICON_INFORMATION)
         
     def on_ok(self, event):
         try:
@@ -115,28 +235,31 @@ class ViaCleanerDialog(wx.Dialog):
                 wx.MessageBox("クリアランスは正の値を入力してください", "エラー", wx.OK | wx.ICON_ERROR)
                 return
             
+            # 設定を保存
+            self.save_settings()
+            
             event.Skip()  # ダイアログを閉じる
         except ValueError:
             wx.MessageBox("有効な数値を入力してください", "エラー", wx.OK | wx.ICON_ERROR)
 
-class ViaCleaner(pcbnew.ActionPlugin):
+class OptimizedViaCleaner(pcbnew.ActionPlugin):
     def defaults(self):
-        self.name = "VIA クリーナー"
+        self.name = "VIA クリーナー（高速化版）"
         self.category = "編集"
-        self.description = "選択したVIAから衝突や不適切なクリアランスのものを削除します"
+        self.description = "選択したVIAから衝突や不適切なクリアランスのものを高速で削除します"
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(os.path.dirname(__file__), 'via_cleaner.png')
     
     def Run(self):
         board = pcbnew.GetBoard()
         
-        # 選択されたアイテムを取得
-        selected_items = []
+        # 選択されたVIAを取得
+        selected_vias = []
         for item in board.GetTracks():
             if item.IsSelected() and item.Type() == pcbnew.PCB_VIA_T:
-                selected_items.append(item)
+                selected_vias.append(item)
         
-        if not selected_items:
+        if not selected_vias:
             wx.MessageBox("VIAが選択されていません。VIAまたはVIAを含むグループを選択してください。", "情報", wx.OK | wx.ICON_INFORMATION)
             return
         
@@ -146,7 +269,7 @@ class ViaCleaner(pcbnew.ActionPlugin):
             dialog.Destroy()
             return
         
-        # ダイアログから設定を取得
+        # 設定取得
         min_clearance = pcbnew.FromMM(dialog.clearance)
         board_edge_clearance = pcbnew.FromMM(dialog.board_edge_clearance)
         zone_clearance = pcbnew.FromMM(dialog.zone_clearance)
@@ -157,353 +280,309 @@ class ViaCleaner(pcbnew.ActionPlugin):
         check_outside_board = dialog.check_outside_board.GetValue()
         dialog.Destroy()
         
-        # 処理開始時間
         start_time = time.time()
         
-        # 基板の境界線を取得（基板エッジクリアランスチェック用）
-        board_outlines = []
-        if check_board_edge:
-            for drawing in board.GetDrawings():
-                if drawing.GetClass() == "PCB_SHAPE" and drawing.GetLayer() == pcbnew.Edge_Cuts:
-                    board_outlines.append(drawing)
+        # 高速化のための前処理
+        spatial_cache = self._build_spatial_cache(board, selected_vias, min_clearance, check_components, check_nets)
+        board_info = self._get_board_info(board, check_board_edge, check_outside_board)
+        zone_info = self._get_zone_info(board, check_zones)
         
-        # 基板の外接矩形（バウンディングボックス）を取得
-        board_bbox = None
-        outside_board_method = 0  # 基板外VIA削除の方法: 0=無効, 1=矩形, 2=個別線分
-        
-        if check_outside_board:
-            try:
-                # 方法1: バウンディングボックスを直接取得（KiCad 9系）
-                if hasattr(board, "GetBoardEdgesBoundingBox"):
-                    board_bbox = board.GetBoardEdgesBoundingBox()
-                    if board_bbox and board_bbox.GetWidth() > 0 and board_bbox.GetHeight() > 0:
-                        outside_board_method = 1
-                    else:
-                        board_bbox = None
-                
-                # 方法2: 基板コンテナからバウンディングボックスを計算（KiCad 6系互換）
-                if outside_board_method == 0 and hasattr(board, "ComputeBoundingBox"):
-                    board_bbox = board.ComputeBoundingBox(True)
-                    if board_bbox and board_bbox.GetWidth() > 0 and board_bbox.GetHeight() > 0:
-                        outside_board_method = 1
-                    else:
-                        board_bbox = None
-                
-                # 方法3: 基板エッジラインから個別に判定（最終手段）
-                if outside_board_method == 0 and len(board_outlines) > 0:
-                    # 基板アウトラインが存在する場合は個別線分チェックを使用
-                    outside_board_method = 2
-                
-                # 基板外VIA削除機能の状態をユーザーに通知
-                if outside_board_method == 0:
-                    wx.MessageBox("基板のアウトラインが検出できませんでした。基板外VIA削除機能は無効になります。", 
-                                "警告", wx.OK | wx.ICON_WARNING)
-            
-            except Exception as e:
-                wx.MessageBox(f"基板アウトライン取得中にエラーが発生しました: {str(e)}\n基板外VIA削除機能は無効になります。", 
-                            "警告", wx.OK | wx.ICON_WARNING)
-                outside_board_method = 0
-        
-        # ゾーンを取得（ゾーンエッジクリアランスチェック用）
-        zones = []
-        if check_zones:
-            for zone in board.Zones():
-                zones.append(zone)
-        
-        # キャッシュの準備（高速化のため）
-        footprints = []
-        if check_components:
-            footprints = list(board.GetFootprints())
-        
-        tracks_by_net = {}
-        if check_nets:
-            for track in board.GetTracks():
-                net_code = track.GetNetCode()
-                if net_code not in tracks_by_net:
-                    tracks_by_net[net_code] = []
-                tracks_by_net[net_code].append(track)
-        
-        # VIAをチェックと削除
+        # VIAをチェック
         vias_to_remove = []
         outside_board_count = 0
+        component_collision_count = 0
+        net_collision_count = 0
+        board_edge_collision_count = 0
+        zone_collision_count = 0
         
-        for via in selected_items:
-            should_remove = False
-            is_outside_board = False
-            via_pos = via.GetPosition()
-            via_net = via.GetNetCode()
-            via_drill = via.GetDrill()
-            via_width = via.GetWidth()
-            via_radius = via_width / 2
+        for via in selected_vias:
+            removal_reason = self._check_via_fast(via, spatial_cache, board_info, zone_info, 
+                                                min_clearance, board_edge_clearance, zone_clearance,
+                                                check_components, check_nets, check_board_edge, 
+                                                check_zones, check_outside_board)
             
-            # 基板外のVIAをチェック
-            if check_outside_board and not should_remove:
-                if outside_board_method == 1 and board_bbox:
-                    # 方法1: バウンディングボックスによるチェック
-                    if not board_bbox.Contains(via_pos):
-                        should_remove = True
-                        is_outside_board = True
-                        outside_board_count += 1
-                        vias_to_remove.append(via)
-                        continue
-                
-                elif outside_board_method == 2:
-                    # 方法2: 線分ベースのチェック（点が基板の内側にあるかどうかを判定）
-                    crosses = 0
-                    test_point = pcbnew.wxPoint(via_pos.x, via_pos.y)
-                    
-                    # 境界線と交差回数をカウント
-                    for outline in board_outlines:
-                        if outline.GetShape() == pcbnew.SHAPE_T_SEGMENT:
-                            start = outline.GetStart()
-                            end = outline.GetEnd()
-                            
-                            # 水平線と基板アウトラインの交差をチェック
-                            if ((start.y > test_point.y) != (end.y > test_point.y)) and \
-                               (test_point.x < start.x + (end.x - start.x) * (test_point.y - start.y) / (end.y - start.y)):
-                                crosses += 1
-                    
-                    # 交差回数が奇数なら内側、偶数なら外側
-                    if crosses % 2 == 0:  # 外側
-                        should_remove = True
-                        is_outside_board = True
-                        outside_board_count += 1
-                        vias_to_remove.append(via)
-                        continue
-            
-            # 部品との衝突チェック
-            if check_components and not should_remove:
-                for footprint in footprints:
-                    fp_bbox = footprint.GetBoundingBox()
-                    if fp_bbox.Contains(via_pos):
-                        should_remove = True
-                        break
-            
-            # 異なるネットとの衝突チェック
-            if check_nets and not should_remove:
-                # 自分のネット以外のトラックをチェック
-                for net_code, tracks in tracks_by_net.items():
-                    if net_code == via_net:
-                        continue
-                    
-                    for track in tracks:
-                        if track.Type() == pcbnew.PCB_TRACE_T or track.Type() == pcbnew.PCB_ARC_T:
-                            clearance_needed = min_clearance + via_radius + track.GetWidth()/2
-                            if track.HitTest(via_pos, clearance_needed):
-                                should_remove = True
-                                break
-                        
-                        elif track.Type() == pcbnew.PCB_VIA_T and track != via:
-                            other_via_pos = track.GetPosition()
-                            clearance_needed = min_clearance + via_radius + track.GetWidth()/2
-                            # 距離計算
-                            dx = via_pos.x - other_via_pos.x
-                            dy = via_pos.y - other_via_pos.y
-                            distance = math.sqrt(dx*dx + dy*dy)
-                            
-                            if distance < clearance_needed:
-                                should_remove = True
-                                break
-                    
-                    if should_remove:
-                        break
-            
-            # 基板エッジとの衝突チェック
-            if check_board_edge and not should_remove:
-                clearance_needed = board_edge_clearance + via_radius
-                
-                for outline in board_outlines:
-                    # 輪郭の形状に応じたチェック
-                    if outline.GetShape() == pcbnew.SHAPE_T_SEGMENT:
-                        # 線分の場合
-                        start = outline.GetStart()
-                        end = outline.GetEnd()
-                        if self.distance_point_to_segment(via_pos, start, end) < clearance_needed:
-                            should_remove = True
-                            break
-                    elif outline.GetShape() == pcbnew.SHAPE_T_ARC:
-                        # 円弧の場合
-                        center = outline.GetCenter()
-                        radius = outline.GetRadius()
-                        
-                        # KiCad 9.0.2では円弧の角度取得方法が異なる
-                        try:
-                            # 新しいAPI (KiCad 9系)
-                            start = outline.GetStart()
-                            end = outline.GetEnd()
-                            
-                            # 始点と終点から角度を計算
-                            start_vec_x = start.x - center.x
-                            start_vec_y = start.y - center.y
-                            end_vec_x = end.x - center.x
-                            end_vec_y = end.y - center.y
-                            
-                            start_angle = math.degrees(math.atan2(start_vec_y, start_vec_x))
-                            end_angle = math.degrees(math.atan2(end_vec_y, end_vec_x))
-                            
-                            # 円弧の角度差を計算
-                            angle = end_angle - start_angle
-                            if angle <= 0:
-                                angle += 360
-                            
-                        except AttributeError:
-                            # 旧API互換性のため (KiCad 6系以前)
-                            start_angle = outline.GetArcAngleStart()
-                            angle = outline.GetAngle()
-                        
-                        # 円弧上の最近接点との距離を計算
-                        distance = self.distance_point_to_arc(via_pos, center, radius, start_angle, angle)
-                        if distance < clearance_needed:
-                            should_remove = True
-                            break
-                    elif outline.GetShape() == pcbnew.SHAPE_T_CIRCLE:
-                        # 円の場合
-                        center = outline.GetCenter()
-                        radius = outline.GetRadius()
-                        # 距離計算
-                        dx = via_pos.x - center.x
-                        dy = via_pos.y - center.y
-                        distance = math.sqrt(dx*dx + dy*dy) - radius
-                        
-                        if abs(distance) < clearance_needed:
-                            should_remove = True
-                            break
-                    elif outline.GetShape() == pcbnew.SHAPE_T_POLY:
-                        # ポリゴンの場合
-                        try:
-                            # KiCad 9.0.2 のAPIでポリゴンとの距離を計算
-                            outline_poly = outline.GetPolyShape()
-                            if outline_poly.Distance(via_pos) < clearance_needed:
-                                should_remove = True
-                                break
-                        except AttributeError:
-                            # 古いバージョンの場合は処理をスキップ
-                            pass
-            
-            # ゾーンエッジとの衝突チェック
-            if check_zones and not should_remove:
-                clearance_needed = zone_clearance + via_radius
-                
-                for zone in zones:
-                    # 同じネットのゾーンはスキップ
-                    if zone.GetNetCode() == via_net:
-                        continue
-                    
-                    # ゾーン内にVIAがあるかチェック
-                    try:
-                        zone_poly = zone.Outline()
-                        distance = zone_poly.Distance(via_pos)
-                        if distance < clearance_needed:
-                            should_remove = True
-                            break
-                    except AttributeError:
-                        # 古いバージョンの場合は処理をスキップ
-                        pass
-            
-            if should_remove and not is_outside_board:  # 基板外VIAとして既に追加済みの場合はスキップ
+            if removal_reason:
                 vias_to_remove.append(via)
+                if removal_reason == "outside_board":
+                    outside_board_count += 1
+                elif removal_reason == "component_collision":
+                    component_collision_count += 1
+                elif removal_reason == "net_collision":
+                    net_collision_count += 1
+                elif removal_reason == "board_edge_collision":
+                    board_edge_collision_count += 1
+                elif removal_reason == "zone_collision":
+                    zone_collision_count += 1
         
-        # 削除を実行
+        # 削除実行
         if vias_to_remove:
             for via in vias_to_remove:
                 board.Remove(via)
             
             pcbnew.Refresh()
             
-            # 処理時間計測
             end_time = time.time()
             execution_time = end_time - start_time
             
-            # 基板外VIAの情報を含める
+            # 詳細な削除理由を表示
+            details = []
             if outside_board_count > 0:
-                wx.MessageBox(f"{len(vias_to_remove)} 個のVIAを削除しました。\n（うち基板外VIA: {outside_board_count}個）\n処理時間: {execution_time:.2f}秒", 
-                              "完了", wx.OK | wx.ICON_INFORMATION)
-            else:
-                wx.MessageBox(f"{len(vias_to_remove)} 個のVIAを削除しました。\n処理時間: {execution_time:.2f}秒", 
-                              "完了", wx.OK | wx.ICON_INFORMATION)
+                details.append(f"基板外VIA: {outside_board_count}個")
+            if component_collision_count > 0:
+                details.append(f"部品衝突: {component_collision_count}個")
+            if net_collision_count > 0:
+                details.append(f"ネット衝突: {net_collision_count}個")
+            if board_edge_collision_count > 0:
+                details.append(f"基板エッジ衝突: {board_edge_collision_count}個")
+            if zone_collision_count > 0:
+                details.append(f"ゾーン衝突: {zone_collision_count}個")
+            
+            detail_text = "\n".join(details) if details else ""
+            
+            message = f"{len(vias_to_remove)} 個のVIAを削除しました。\n"
+            if detail_text:
+                message += f"\n削除理由の詳細:\n{detail_text}\n"
+            message += f"\n処理時間: {execution_time:.2f}秒"
+            
+            wx.MessageBox(message, "完了", wx.OK | wx.ICON_INFORMATION)
         else:
-            # 処理時間計測
             end_time = time.time()
             execution_time = end_time - start_time
-            
             wx.MessageBox(f"削除するVIAはありませんでした。\n処理時間: {execution_time:.2f}秒", 
                           "情報", wx.OK | wx.ICON_INFORMATION)
     
-    # 点と線分の距離を計算する関数
-    def distance_point_to_segment(self, point, segment_start, segment_end):
-        """点と線分の最短距離を計算"""
-        # ベクトル計算（PCBNEWのVECTOR2Iオブジェクトに対応）
+    def _build_spatial_cache(self, board, selected_vias, min_clearance, check_components, check_nets):
+        """空間インデックスとキャッシュを構築"""
+        cache = {}
+        
+        # 部品の空間インデックス（シンプル版）
+        if check_components:
+            footprints_list = list(board.GetFootprints())
+            cache['footprints_list'] = footprints_list
+        
+        # トラックの空間インデックス（ネット別）
+        if check_nets:
+            tracks_by_net = defaultdict(lambda: SpatialIndex())
+            for track in board.GetTracks():
+                if track.Type() in [pcbnew.PCB_TRACE_T, pcbnew.PCB_ARC_T, pcbnew.PCB_VIA_T]:
+                    net_code = track.GetNetCode()
+                    if track.Type() == pcbnew.PCB_VIA_T:
+                        pos = track.GetPosition()
+                        tracks_by_net[net_code].add_item(pos.x, pos.y, track)
+                    else:
+                        # トラックの中点を使用
+                        start = track.GetStart()
+                        end = track.GetEnd()
+                        center_x = (start.x + end.x) // 2
+                        center_y = (start.y + end.y) // 2
+                        tracks_by_net[net_code].add_item(center_x, center_y, track)
+            cache['tracks_by_net'] = tracks_by_net
+        
+        return cache
+    
+    def _get_board_info(self, board, check_board_edge, check_outside_board):
+        """基板情報を取得"""
+        if not (check_board_edge or check_outside_board):
+            return None
+        
+        board_outlines = []
+        board_bbox = None
+        
+        # 基板アウトライン取得
+        for drawing in board.GetDrawings():
+            if drawing.GetClass() == "PCB_SHAPE" and drawing.GetLayer() == pcbnew.Edge_Cuts:
+                board_outlines.append(drawing)
+        
+        # バウンディングボックス取得
+        if check_outside_board:
+            try:
+                if hasattr(board, "GetBoardEdgesBoundingBox"):
+                    board_bbox = board.GetBoardEdgesBoundingBox()
+                elif hasattr(board, "ComputeBoundingBox"):
+                    board_bbox = board.ComputeBoundingBox(True)
+            except:
+                board_bbox = None
+        
+        return {
+            'outlines': board_outlines,
+            'bbox': board_bbox
+        }
+    
+    def _get_zone_info(self, board, check_zones):
+        """ゾーン情報を取得"""
+        if not check_zones:
+            return None
+        
+        zones = []
+        for zone in board.Zones():
+            zones.append(zone)
+        
+        return {'zones': zones}
+    
+    def _check_via_fast(self, via, spatial_cache, board_info, zone_info, 
+                       min_clearance, board_edge_clearance, zone_clearance,
+                       check_components, check_nets, check_board_edge, 
+                       check_zones, check_outside_board):
+        """高速化されたVIAチェック"""
+        via_pos = via.GetPosition()
+        via_net = via.GetNetCode()
+        via_radius = via.GetWidth() // 2
+        
+        # 基板外チェック（最も高速）
+        if check_outside_board and board_info and board_info['bbox']:
+            if not board_info['bbox'].Contains(via_pos):
+                return "outside_board"
+        
+        # 部品との衝突チェック（シンプル版）
+        if check_components and 'footprints_list' in spatial_cache:
+            # 全部品をチェック（シンプルで確実）
+            for footprint in spatial_cache['footprints_list']:
+                bbox = footprint.GetBoundingBox()
+                if bbox.Contains(via_pos):
+                    return "component_collision"
+        
+        # 異なるネットとの衝突チェック（空間インデックス使用）
+        if check_nets and 'tracks_by_net' in spatial_cache:
+            tracks_by_net = spatial_cache['tracks_by_net']
+            search_radius = min_clearance + via_radius * 2  # 余裕を持った検索半径
+            
+            for net_code, track_index in tracks_by_net.items():
+                if net_code == via_net:
+                    continue
+                
+                nearby_tracks = track_index.get_nearby_items(via_pos.x, via_pos.y, search_radius)
+                
+                for track_x, track_y, track in nearby_tracks:
+                    if self._check_track_collision_fast(via, track, min_clearance):
+                        return "net_collision"
+        
+        # 基板エッジとの衝突チェック
+        if check_board_edge and board_info and board_info['outlines']:
+            clearance_needed = board_edge_clearance + via_radius
+            
+            for outline in board_info['outlines']:
+                if self._distance_to_outline_fast(via_pos, outline) < clearance_needed:
+                    return "board_edge_collision"
+        
+        # ゾーンとの衝突チェック
+        if check_zones and zone_info:
+            clearance_needed = zone_clearance + via_radius
+            
+            for zone in zone_info['zones']:
+                if zone.GetNetCode() == via_net:
+                    continue
+                
+                try:
+                    zone_poly = zone.Outline()
+                    if zone_poly.Distance(via_pos) < clearance_needed:
+                        return "zone_collision"
+                except AttributeError:
+                    pass
+        
+        return None  # 削除不要
+    
+    def _check_track_collision_fast(self, via, track, min_clearance):
+        """高速トラック衝突チェック"""
+        via_pos = via.GetPosition()
+        via_radius = via.GetWidth() // 2
+        
+        if track.Type() == pcbnew.PCB_VIA_T:
+            if track == via:
+                return False
+            
+            other_pos = track.GetPosition()
+            other_radius = track.GetWidth() // 2
+            clearance_needed = min_clearance + via_radius + other_radius
+            
+            # 距離の二乗で比較（sqrt計算を回避）
+            dx = via_pos.x - other_pos.x
+            dy = via_pos.y - other_pos.y
+            distance_squared = dx * dx + dy * dy
+            clearance_needed_squared = clearance_needed * clearance_needed
+            
+            return distance_squared < clearance_needed_squared
+        
+        elif track.Type() in [pcbnew.PCB_TRACE_T, pcbnew.PCB_ARC_T]:
+            clearance_needed = min_clearance + via_radius + track.GetWidth() // 2
+            return track.HitTest(via_pos, clearance_needed)
+        
+        return False
+    
+    def _distance_to_outline_fast(self, point, outline):
+        """高速アウトライン距離計算"""
+        if outline.GetShape() == pcbnew.SHAPE_T_SEGMENT:
+            return self._distance_point_to_segment_fast(point, outline.GetStart(), outline.GetEnd())
+        elif outline.GetShape() == pcbnew.SHAPE_T_CIRCLE:
+            center = outline.GetCenter()
+            radius = outline.GetRadius()
+            dx = point.x - center.x
+            dy = point.y - center.y
+            center_distance = math.sqrt(dx*dx + dy*dy)
+            return abs(center_distance - radius)
+        else:
+            # 他の形状は元の処理を使用
+            return self.distance_point_to_segment(point, outline.GetStart(), outline.GetEnd())
+    
+    def _distance_point_to_segment_fast(self, point, segment_start, segment_end):
+        """高速化された点と線分の距離計算"""
         segment_vec_x = segment_end.x - segment_start.x
         segment_vec_y = segment_end.y - segment_start.y
         
-        # 線分の長さの二乗
         segment_length_squared = segment_vec_x * segment_vec_x + segment_vec_y * segment_vec_y
         
-        # 線分の長さが0の場合（点の場合）
         if segment_length_squared == 0:
             dx = point.x - segment_start.x
             dy = point.y - segment_start.y
             return math.sqrt(dx*dx + dy*dy)
         
-        # 点から線分への射影の比率（0〜1の範囲に制限）
         point_vec_x = point.x - segment_start.x
         point_vec_y = point.y - segment_start.y
         
-        # 内積計算
         dot_product = segment_vec_x * point_vec_x + segment_vec_y * point_vec_y
-        
         t = max(0, min(1, dot_product / segment_length_squared))
         
-        # 線分上の最近接点
         projection_x = segment_start.x + segment_vec_x * t
         projection_y = segment_start.y + segment_vec_y * t
         
-        # 点と最近接点の距離
         dx = point.x - projection_x
         dy = point.y - projection_y
         return math.sqrt(dx*dx + dy*dy)
     
-    # 点と円弧の距離を計算する関数
+    # 元のヘルパーメソッドも保持（互換性のため）
+    def distance_point_to_segment(self, point, segment_start, segment_end):
+        return self._distance_point_to_segment_fast(point, segment_start, segment_end)
+    
     def distance_point_to_arc(self, point, arc_center, arc_radius, start_angle_deg, angle_deg):
-        """点と円弧の最短距離を計算"""
-        # 点と中心の距離
+        """元の円弧距離計算メソッド"""
         dx = point.x - arc_center.x
         dy = point.y - arc_center.y
         center_to_point = math.sqrt(dx*dx + dy*dy)
         
-        # 中心から点への角度（ラジアン）
         angle_to_point = math.atan2(dy, dx)
-        # 度数法に変換
         angle_to_point_deg = math.degrees(angle_to_point)
         
-        # 円弧の開始角と終了角（度数法）
         start_angle_norm = start_angle_deg % 360
         end_angle_norm = (start_angle_norm + angle_deg) % 360
         
-        # 点の角度が円弧の範囲内かどうか
         is_in_range = False
         if start_angle_norm <= end_angle_norm:
             is_in_range = start_angle_norm <= angle_to_point_deg <= end_angle_norm
-        else:  # 0度を跨ぐ場合
+        else:
             is_in_range = angle_to_point_deg >= start_angle_norm or angle_to_point_deg <= end_angle_norm
         
         if is_in_range:
-            # 円弧上の最近接点との距離
             return abs(center_to_point - arc_radius)
         else:
-            # 円弧の端点との距離を計算
             start_x = arc_center.x + int(arc_radius * math.cos(math.radians(start_angle_norm)))
             start_y = arc_center.y + int(arc_radius * math.sin(math.radians(start_angle_norm)))
             
             end_x = arc_center.x + int(arc_radius * math.cos(math.radians(end_angle_norm)))
             end_y = arc_center.y + int(arc_radius * math.sin(math.radians(end_angle_norm)))
             
-            # 開始点までの距離
             dx1 = point.x - start_x
             dy1 = point.y - start_y
             dist_to_start = math.sqrt(dx1*dx1 + dy1*dy1)
             
-            # 終了点までの距離
             dx2 = point.x - end_x
             dy2 = point.y - end_y
             dist_to_end = math.sqrt(dx2*dx2 + dy2*dy2)
@@ -511,4 +590,4 @@ class ViaCleaner(pcbnew.ActionPlugin):
             return min(dist_to_start, dist_to_end)
 
 # プラグインの登録
-ViaCleaner().register()
+OptimizedViaCleaner().register()
